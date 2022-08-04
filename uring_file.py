@@ -62,26 +62,27 @@ class NoSubmitQueueSpaceError(Exception):
 
 
 class Uring:
-    def __init__(self, sqe_size: int = 8, cqe_size: int = 128):
+    def __init__(self, sq_size: int = 8, cq_size: int = 128):
         self._uring: UringType = liburing.io_uring()
         self._eventfd: int = libc.eventfd(0, os.O_NONBLOCK | os.O_CLOEXEC)
         self._waiting_sqes: dict[int, UringSQE] = {}
-        self._sqe_size: int = sqe_size
-        self._cqe_size: int = cqe_size
+        self._sq_size: int = sq_size
+        self._cq_size: int = cq_size
         self._setup_done: bool = False
         self._loop: asyncio.AbstractEventLoop
         self._lock: asyncio.Lock = asyncio.Lock()
         self._sem: asyncio.Semaphore = asyncio.Semaphore(
-            2*self._cqe_size
+            2*self._cq_size
         )  # Prevent error "Device or resource busy"
 
     def setup(self):
         if self._setup_done is False:
             params = liburing.io_uring_params()
-            params.cq_entries = self._cqe_size
+            params.cq_entries = self._cq_size
             params.flags = liburing.IORING_SETUP_CQSIZE
             liburing.io_uring_queue_init_params(
-                self._sqe_size, self._uring, params)
+                self._sq_size, self._uring, params
+            )
             liburing.io_uring_register_eventfd(self._uring, self._eventfd)
             self._loop = asyncio.get_event_loop()
             self._loop.add_reader(self._eventfd, self._eventfd_callback)
