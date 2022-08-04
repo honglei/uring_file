@@ -1,168 +1,318 @@
+from __future__ import annotations
+import ctypes
 import asyncio
 import atexit
-import ctypes
-import enum
+from contextlib import asynccontextmanager
 import os
-
+from typing import Callable, Iterable, Literal, Optional, AsyncGenerator, Union, overload
 import liburing
+
 
 libc = ctypes.CDLL(None)
 
+# classes for type hinting
 
-class RequestType(str, enum.Enum):
-    OPEN = 'OPEN'
-    CLOSE = 'CLOSE'
-    READ = 'READ'
-    WRITE = 'WRITE'
+
+class UringType:
+    flags: int
+    ring_fd: int
+
+
+class SQEType:
+    opcode: int
+    flags: int
+    ioprio: int
+    fd: int
+    user_data: int
+
+
+class CQEType:
+    user_data: int
+    res: int
+    flags: int
+
+
+class TimeStampType:
+    tv_sec: int
+    tv_nsec: int
+
+
+class StatXType:
+    stx_mask: int
+    stx_blksize: int
+    stx_attributes: int
+    stx_nlink: int
+    stx_uid: int
+    stx_gid: int
+    stx_mode: int
+    stx_ino: int
+    stx_size: int
+    stx_blocks: int
+    stx_attributes_mask: int
+    stx_atime: TimeStampType
+    stx_btime: TimeStampType
+    stx_ctime: TimeStampType
+    stx_mtime: TimeStampType
+    stx_rdev_major: int
+    stx_rdev_minor: int
+
+
+class NoSubmitQueueSpaceError(Exception):
+    pass
 
 
 class Uring:
-    def __init__(self, loop=None, queue_size=32):
-        self.event_fd = libc.eventfd(0, os.O_NONBLOCK | os.O_CLOEXEC)
-        self.ring = liburing.io_uring()
-        self.cqes = liburing.io_uring_cqes(1)
-        self.store = {}
-        self.loop = loop
-        self.queue_size = queue_size
-        self._setup_done = False
+    def __init__(self, sqe_size: int = 8, cqe_size: int = 128):
+        self._uring: UringType = liburing.io_uring()
+        self._eventfd: int = libc.eventfd(0, os.O_NONBLOCK | os.O_CLOEXEC)
+        self._waiting_sqes: dict[int, UringSQE] = {}
+        self._sqe_size: int = sqe_size
+        self._cqe_size: int = cqe_size
+        self._setup_done: bool = False
+        self._loop: asyncio.AbstractEventLoop
+        self._lock: asyncio.Lock = asyncio.Lock()
+        self._sem: asyncio.Semaphore = asyncio.Semaphore(
+            2*self._cqe_size
+        )  # Prevent error "Device or resource busy"
 
     def setup(self):
-        liburing.io_uring_queue_init(self.queue_size, self.ring)
-        liburing.io_uring_register_eventfd(self.ring, self.event_fd)
+        if self._setup_done is False:
+            params = liburing.io_uring_params()
+            params.cq_entries = self._cqe_size
+            params.flags = liburing.IORING_SETUP_CQSIZE
+            liburing.io_uring_queue_init_params(
+                self._sqe_size, self._uring, params)
+            liburing.io_uring_register_eventfd(self._uring, self._eventfd)
+            self._loop = asyncio.get_event_loop()
+            self._loop.add_reader(self._eventfd, self._eventfd_callback)
+            atexit.register(self._cleanup)
+            self._setup_done = True
 
-        if self.loop is None:
-            self.loop = asyncio.get_event_loop()
-        self.loop.add_reader(self.event_fd, self.eventfd_callback)
-
-        atexit.register(self.cleanup)
-        self._setup_done = True
-
-    def eventfd_callback(self):
-        libc.eventfd_read(self.event_fd, os.O_NONBLOCK | os.O_CLOEXEC)
-        while True:
-            try:
-                liburing.io_uring_peek_cqe(self.ring, self.cqes)
-            except BlockingIOError:
-                break
-            cqe = self.cqes[0]
-            result = liburing.trap_error(cqe.res)
-            request_type, future, *args = self.store[cqe.user_data]
-
-            if request_type is RequestType.OPEN:
-                future.set_result(result)
-            elif request_type is RequestType.CLOSE:
-                future.set_result(None)
-            elif request_type is RequestType.READ:
-                future.set_result(args[0])
-            elif request_type is RequestType.WRITE:
-                future.set_result(None)
-            else:
-                raise RuntimeError
-
-            del self.store[cqe.user_data]
-            liburing.io_uring_cqe_seen(self.ring, cqe)
-
-    def _get_sqe(self):
-        if not self._setup_done:
-            self.setup()
-
-        return liburing.io_uring_get_sqe(self.ring)
-
-    def _submit(self, request_type, sqe, *args):
-        future = asyncio.Future()
-        sqe.user_data = id(future)
-        self.store[sqe.user_data] = request_type, future, *args
-        liburing.io_uring_submit(self.ring)
-        return future
-
-    def submit_open_entry(self, fpath, flags, mode, dir_fd):
-        sqe = self._get_sqe()
-        path = os.path.abspath(fpath).encode()
-        liburing.io_uring_prep_openat(sqe, dir_fd, path, flags, mode)
-        return self._submit(RequestType.OPEN, sqe, path)
-
-    def submit_close_entry(self, fd):
-        sqe = self._get_sqe()
-        liburing.io_uring_prep_close(sqe, fd)
-        return self._submit(RequestType.CLOSE, sqe)
-
-    def submit_read_entry(self, fd, size, offset):
-        sqe = self._get_sqe()
-        array = bytearray(size)
-        iovecs = liburing.iovec(array)
-        liburing.io_uring_prep_readv(sqe, fd, iovecs, len(iovecs), offset)
-        return self._submit(RequestType.READ, sqe, array)
-
-    def submit_write_entry(self, fd, data, offset):
-        sqe = self._get_sqe()
-        iovecs = liburing.iovec(data)
-        liburing.io_uring_prep_writev(sqe, fd, iovecs, len(iovecs), offset)
-        return self._submit(RequestType.WRITE, sqe)
-
-    def cleanup(self):
-        liburing.io_uring_unregister_eventfd(self.ring)
-        liburing.io_uring_queue_exit(self.ring)
-        self.loop.remove_reader(self.event_fd)
+    def _cleanup(self):
+        liburing.io_uring_unregister_eventfd(self._uring)
+        liburing.io_uring_queue_exit(self._uring)
+        self._loop.remove_reader(self._eventfd)
         self._setup_done = False
 
+    def _eventfd_callback(self):
+        libc.eventfd_read(self._eventfd, os.O_NONBLOCK | os.O_CLOEXEC)
+        cqes: list[CQEType] = liburing.io_uring_cqes()
+        while True:
+            try:
+                liburing.io_uring_peek_cqe(self._uring, cqes)
+            except BlockingIOError:
+                break
+            cqe: CQEType = cqes[0]
+            liburing.io_uring_cqe_seen(self._uring, cqe)
+            self._waiting_sqes[cqe.user_data].set_result(cqe.res)
+            del self._waiting_sqes[cqe.user_data]
+            self._sem.release()
 
-_DEFAULT_URING = Uring()
+    async def aquire_lock(self):
+        await self._lock.acquire()
+
+    def release_lock(self):
+        self._lock.release()
+
+    def sq_space_left(self) -> int:
+        return liburing.io_uring_sq_space_left(self._uring)
+
+    async def submit(self, sqes: Iterable[UringSQE]):
+        for sqe in sqes:
+            await self._sem.acquire()
+            sqe._sqe.user_data = id(sqe._future)
+            self._waiting_sqes[sqe._sqe.user_data] = sqe
+        liburing.io_uring_submit(self._uring)
+
+    def session(self):
+        return UringSession(self)
 
 
-class File:
-    def __init__(self, fpath, uring=_DEFAULT_URING):
-        self.fpath = fpath
-        self._fd = None
-        self._offset = 0
+_DEFAULT_URING: Uring = Uring()
+
+
+def set_default_uring(uring: Uring):
+    global _DEFAULT_URING
+    _DEFAULT_URING = uring
+
+
+def get_default_uring():
+    global _DEFAULT_URING
+    return _DEFAULT_URING
+
+
+class UringSession:
+    def __init__(self, uring: Optional[Uring] = None):
+        if uring is None:
+            uring = get_default_uring()
+        uring.setup()
+        self._uring: Uring = uring
+        self._sqes: set[UringSQE] = set()
+        self._closed: bool = True
+        self._submit_callback: Optional[Callable] = None
+
+    async def __aenter__(self):
+        return await self.open()
+
+    async def __aexit__(self, exc_type, exc, tb):
+        await self.close()
+
+    async def open(self) -> UringSession:
+        await self._uring.aquire_lock()
+        self._closed = False
+        self._sqes.clear()
+        return self
+
+    async def close(self):
+        self._closed = True
+        await self._uring.submit(self._sqes)
+        self._uring.release_lock()
+        if self._submit_callback is not None:
+            self._submit_callback()
+        await asyncio.gather(*[sqe.wait() for sqe in self._sqes])
+
+    def get_sqe(self) -> UringSQE:
+        assert self._closed is False
+        sqe = UringSQE(self._uring)
+        self._sqes.add(sqe)
+        return sqe
+
+    def submit_callback(self, func: Callable[[], None]):
+        self._submit_callback = func
+
+
+class UringSQE:
+    def __init__(self, uring: Uring) -> None:
+        uring.setup()
         self._uring = uring
+        if self._uring.sq_space_left() == 0:
+            raise NoSubmitQueueSpaceError
+        self._sqe: SQEType = liburing.io_uring_get_sqe(self._uring._uring)
+        self._future: asyncio.Future[int] = asyncio.Future()
 
-    def open(self, flags=os.O_RDONLY, mode=0o660, dir_fd=-1):
+    def set_result(self, data: int):
+        self._future.set_result(data)
+
+    def result(self) -> int:
+        return self._future.result()
+
+    async def wait(self) -> int:
+        return liburing.trap_error(await self._future)
+
+    def link(self):
+        self._sqe.flags |= liburing.IOSQE_IO_LINK
+        return self
+
+    def fixed_file(self):
+        self._sqe.flags |= liburing.IOSQE_FIXED_FILE
+        return self
+
+    def prep_openat(self, dir_fd: int, path: bytes, flags: int, mode: int):
+        liburing.io_uring_prep_openat(
+            self._sqe, dir_fd, path, flags, mode
+        )
+        return self
+
+    def prep_close(self, fd: int):
+        liburing.io_uring_prep_close(self._sqe, fd)
+        return self
+
+    def prep_readv(self, fd: int, iovecs, nr_vecs: int, offset: int):
+        liburing.io_uring_prep_readv(
+            self._sqe, fd, iovecs, nr_vecs, offset
+        )
+        return self
+
+    def prep_writev(self, fd: int, iovecs, nr_vecs: int, offset: int):
+        liburing.io_uring_prep_writev(
+            self._sqe, fd, iovecs, nr_vecs, offset
+        )
+        return self
+
+    def prep_write(self, fd: int, buf, nbytes: int, offset: int):
+        liburing.io_uring_prep_write(
+            self._sqe, fd, buf, nbytes, offset
+        )
+        return self
+
+    def prep_statx(self, fd: int, path: bytes, flags: int, mask: int, statx_buf: list[StatXType]):
+        liburing.io_uring_prep_statx(
+            self._sqe, fd, path, flags, mask, statx_buf
+        )
+        return self
+
+
+class UringFile:
+    def __init__(self, path: Union[os.PathLike, str], uring: Optional[Uring] = None):
+        if uring is None:
+            uring = get_default_uring()
+        uring.setup()
+        self._uring: Uring = uring
+        self._path: str = os.path.normpath(path)
+        self._fd: Optional[int] = None
+        self._ring_fd: Optional[None] = None
+        self._offset: int = 0
+        self._closed: bool = True
+        self._workers: set[asyncio.Future] = set()
+        self._worker_closed: bool = True
+
+    async def __aenter__(self):
+        assert self._closed is False
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        await self.close()
+
+    async def open(self, flags: int = os.O_RDONLY, mode: int = 0o644) -> UringFile:
         assert self._fd is None
+        assert self._closed is True
 
-        async def _open_wrapper():
-            self._fd = await self._uring.submit_open_entry(self.fpath, flags, mode, dir_fd)
-            return self
-
-        async def _close_wrapper():
-            await self.close()
-
-        class _MaybeContextManager:
-            def __await__(self):
-                return _open_wrapper().__await__()
-
-            async def __aenter__(self):
-                return await _open_wrapper()
-
-            async def __aexit__(self, *_):
-                await _close_wrapper()
-
-        return _MaybeContextManager()
+        path: bytes = self._path.encode()
+        async with self._uring.session() as session:
+            sqe = session.get_sqe()
+            sqe.prep_openat(liburing.AT_FDCWD, path, flags, mode)
+        self._fd = sqe.result()
+        self._closed = False
+        return self
 
     async def close(self):
         assert self._fd is not None
-        await self._uring.submit_close_entry(self._fd)
-        self._offset = 0
-        self._fd = None
+        if self._closed is False:
+            self._closed = True
+            await self.close_workers()
+            async with self._uring.session() as session:
+                assert self._fd is not None
+                session.get_sqe().prep_close(self._fd)
+            self._fd = None
+            self._offset = 0
 
-    async def read(self, size=None):
+    async def stat(self) -> StatXType:
         assert self._fd is not None
-        fsize = os.stat(self.fpath).st_size
+        stxs: list[StatXType] = liburing.statx()
+        async with self._uring.session() as session:
+            session.get_sqe().prep_statx(
+                self._fd, "".encode(), liburing.AT_EMPTY_PATH | liburing.AT_SYMLINK_NOFOLLOW,
+                liburing.STATX_ALL, stxs
+            )
+        return stxs[0]
+
+    async def read(self, size: Optional[int] = None) -> bytes:
+        assert self._fd is not None
         if size is None:
-            size = fsize
+            size = (await self.stat()).stx_size
+        array = bytearray(size)
+        iovecs = liburing.iovec(array)
+        async with self._uring.session() as session:
+            sqe = session.get_sqe()
+            sqe.prep_readv(self._fd, iovecs, len(iovecs), self._offset)
+        self._offset += sqe.result()
+        return bytes(array[:sqe.result()])
 
-        size = min(size, fsize - self._offset)
-        if size <= 0:
-            return b''
-
-        data = await self._uring.submit_read_entry(self._fd, size, self._offset)
-        self._offset += len(data)
-        return bytes(data)
-
-    async def readline(self):
+    async def readline(self) -> bytes:
         line = bytearray()
         while (chunk := await self.read(32)):
             if (nl := chunk.find(b'\n')) != -1:
-                line += chunk[:nl]
+                line += chunk[:nl+1]
                 self._offset += nl + 1 - len(chunk)
                 break
             else:
@@ -170,19 +320,181 @@ class File:
         return bytes(line)
 
     async def __aiter__(self):
-        while (line := await self.readline()):
+        while line := await self.readline():
             yield line
 
-    async def write(self, data):
-        await self._uring.submit_write_entry(self._fd, data, self._offset)
-        self._offset += len(data)
+    async def write(self, data: bytes):
+        assert self._fd is not None
+        iov = liburing.iovec(data)
+        async with self._uring.session() as session:
+            sqe = session.get_sqe()
+            sqe.prep_writev(
+                self._fd, iov, len(iov), self._offset
+            )
+        self._offset += sqe.result()
 
-    def seek(self, offset):
+    @asynccontextmanager
+    async def start_async_write(self):
+        self.open_workers()
+        try:
+            yield self
+        finally:
+            await self.close_workers()
+
+    def open_workers(self):
+        self._worker_closed = False
+
+    async def close_workers(self):
+        if self._worker_closed is False:
+            self._worker_closed = True
+            await asyncio.gather(*self._workers)
+
+    def add_worker(self, task: asyncio.Future):
+        self._workers.add(task)
+
+        async def close_worker():
+            try:
+                await task
+            finally:
+                self._workers.discard(task)
+
+        asyncio.create_task(close_worker())
+
+    def write_nowait(self, data: bytes):
+        assert self._worker_closed is False
+
+        async def task_func():
+            assert self._fd is not None
+            iovecs = liburing.iovec(data)
+            offset = self._offset
+            self._offset += len(data)
+            async with self._uring.session() as session:
+                session.get_sqe().prep_writev(
+                    self._fd, iovecs, len(iovecs), offset
+                )
+        self.add_worker(asyncio.create_task(task_func()))
+
+    def seek(self, offset: int):
         self._offset = offset
 
-    def fileno(self):
+    def fileno(self) -> Optional[int]:
         return self._fd
 
 
-def open(fpath, flags=os.O_RDONLY, mode=0o660, dir_fd=-1):
-    return File(fpath).open(flags, mode, dir_fd)
+def get_flags(mode: str):
+    flags = os.O_RDONLY
+    if "w" in mode or "a" in mode:
+        flags = os.O_CREAT
+        if "+" in mode:
+            flags |= os.O_RDWR
+        else:
+            flags |= os.O_WRONLY
+        if "a" in mode:
+            flags |= os.O_APPEND
+    elif "r" in mode and "+" in mode:
+        flags = os.O_RDWR
+    return flags
+
+
+class TextFile:
+    def __init__(self, path: Union[os.PathLike, str]) -> None:
+        self.uring_file = UringFile(path)
+
+    async def open(self, mode: Literal["r", "r+", "w", "w+", "a", "a+"]):
+        await self.uring_file.open(get_flags(mode))
+        return self
+
+    async def close(self):
+        await self.uring_file.close()
+
+    async def stat(self):
+        return await self.uring_file.stat()
+
+    async def read(self, size: Optional[int] = None) -> str:
+        return (await self.uring_file.read(size)).decode()
+
+    async def readline(self) -> str:
+        return (await self.uring_file.readline()).decode()
+
+    async def __aiter__(self):
+        while line := await self.readline():
+            yield line
+
+    async def write(self, data: str):
+        await self.uring_file.write(data.encode())
+
+    def start_async_write(self):
+        return self.uring_file.start_async_write()
+
+    def write_nowait(self, data: str):
+        self.uring_file.write_nowait(data.encode())
+
+    def seek(self, offset):
+        self.uring_file.seek(offset)
+
+    def fileno(self):
+        return self.uring_file.fileno()
+
+
+class BinaryFile:
+    def __init__(self, path: Union[os.PathLike, str]) -> None:
+        self.uring_file = UringFile(path)
+
+    async def open(self, mode: Literal["rb", "rb+", "wb", "wb+", "ab", "ab+"]):
+        await self.uring_file.open(get_flags(mode))
+        return self
+
+    async def close(self):
+        await self.uring_file.close()
+
+    async def stat(self):
+        return await self.uring_file.stat()
+
+    async def read(self, size: Optional[int] = None) -> bytes:
+        return await self.uring_file.read(size)
+
+    async def readline(self) -> bytes:
+        return await self.uring_file.readline()
+
+    async def __aiter__(self):
+        while line := await self.readline():
+            yield line
+
+    async def write(self, data: bytes):
+        await self.uring_file.write(data)
+
+    def start_async_write(self):
+        return self.uring_file.start_async_write()
+
+    def write_nowait(self, data: bytes):
+        self.uring_file.write_nowait(data)
+
+    def seek(self, offset):
+        self.uring_file.seek(offset)
+
+    def fileno(self) -> Optional[int]:
+        return self.uring_file.fileno()
+
+
+@overload
+@asynccontextmanager
+async def open(path: Union[str, os.PathLike], mode: Literal["r", "r+", "w", "w+", "a", "a+"] = "r") -> AsyncGenerator[TextFile, None]:
+    ...
+
+
+@overload
+@asynccontextmanager
+async def open(path: Union[str, os.PathLike], mode: Literal["rb", "rb+", "wb", "wb+", "ab", "ab+"]) -> AsyncGenerator[BinaryFile, None]:
+    ...
+
+
+@asynccontextmanager
+async def open(path: Union[str, os.PathLike], mode: Literal["r", "r+", "w", "w+", "a", "a+", "rb", "rb+", "wb", "wb+", "ab", "ab+"] = "r"):
+    if "b" in mode:
+        file = BinaryFile(path)
+    else:
+        file = TextFile(path)
+    try:
+        yield await file.open(mode)
+    finally:
+        await file.close()
