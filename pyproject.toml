@@ -6,7 +6,7 @@ authors = ["qweeze <qweeeze@gmail.com>"]
 
 [tool.poetry.dependencies]
 python = ">=3.8"
-https://github.com/YoSTEALTH/Liburing.git
+liburing = "https://github.com/YoSTEALTH/Liburing.git"
 
 [tool.poetry.dev-dependencies]
 flake8 = "^3.8.4"
