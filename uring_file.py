@@ -251,7 +251,6 @@ class UringFile:
         self._uring: Uring = uring
         self._path: str = os.path.normpath(path)
         self._fd: Optional[int] = None
-        self._ring_fd: Optional[None] = None
         self._offset: int = 0
         self._closed: bool = True
         self._workers: set[asyncio.Future] = set()
