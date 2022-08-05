@@ -71,9 +71,8 @@ class Uring:
         self._setup_done: bool = False
         self._loop: asyncio.AbstractEventLoop
         self._lock: asyncio.Lock = asyncio.Lock()
-        self._sem: asyncio.Semaphore = asyncio.Semaphore(
-            2*self._cq_size
-        )  # Prevent error "Device or resource busy"
+        # Prevent error "Device or resource busy"
+        self._sem: asyncio.Semaphore = asyncio.Semaphore(self._cq_size)
 
     def setup(self):
         if self._setup_done is False:
