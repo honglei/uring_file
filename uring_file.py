@@ -4,7 +4,7 @@ import asyncio
 import atexit
 from contextlib import asynccontextmanager
 import os
-from typing import Callable, Iterable, Literal, Optional, AsyncGenerator, Union, overload
+from typing import Iterable, Literal, Optional, AsyncGenerator, Union, overload
 import liburing
 
 
@@ -212,7 +212,6 @@ class UringSession:
         self._uring: Uring = uring
         self._sqes: set[UringSQE] = set()
         self._closed: bool = True
-        self._submit_callback: Optional[Callable] = None
 
     async def __aenter__(self):
         return await self.open()
@@ -230,8 +229,6 @@ class UringSession:
         self._closed = True
         await self._uring.submit(self._sqes)
         self._uring.release_lock()
-        if self._submit_callback is not None:
-            self._submit_callback()
         await asyncio.gather(*[sqe.wait() for sqe in self._sqes])
 
     def get_sqe(self) -> UringSQE:
@@ -239,9 +236,6 @@ class UringSession:
         sqe = self._uring._get_sqe()
         self._sqes.add(sqe)
         return sqe
-
-    def submit_callback(self, func: Callable[[], None]):
-        self._submit_callback = func
 
 
 class UringFile:
