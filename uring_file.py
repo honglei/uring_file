@@ -117,6 +117,12 @@ class Uring:
     def sq_space_left(self) -> int:
         return liburing.io_uring_sq_space_left(self._uring)
 
+    def _get_sqe(self) -> UringSQE:
+        if self.sq_space_left() == 0:
+            raise NoSubmitQueueSpaceError
+        _sqe: SQEType = liburing.io_uring_get_sqe(self._uring)
+        return UringSQE(_sqe)
+
     async def submit(self, sqes: Iterable[UringSQE]):
         for sqe in sqes:
             await self._sem.acquire()
@@ -128,66 +134,9 @@ class Uring:
         return UringSession(self)
 
 
-_DEFAULT_URING: Uring = Uring()
-
-
-def set_default_uring(uring: Uring):
-    global _DEFAULT_URING
-    _DEFAULT_URING = uring
-
-
-def get_default_uring():
-    global _DEFAULT_URING
-    return _DEFAULT_URING
-
-
-class UringSession:
-    def __init__(self, uring: Optional[Uring] = None):
-        if uring is None:
-            uring = get_default_uring()
-        uring.setup()
-        self._uring: Uring = uring
-        self._sqes: set[UringSQE] = set()
-        self._closed: bool = True
-        self._submit_callback: Optional[Callable] = None
-
-    async def __aenter__(self):
-        return await self.open()
-
-    async def __aexit__(self, exc_type, exc, tb):
-        await self.close()
-
-    async def open(self) -> UringSession:
-        await self._uring.aquire_lock()
-        self._closed = False
-        self._sqes.clear()
-        return self
-
-    async def close(self):
-        self._closed = True
-        await self._uring.submit(self._sqes)
-        self._uring.release_lock()
-        if self._submit_callback is not None:
-            self._submit_callback()
-        await asyncio.gather(*[sqe.wait() for sqe in self._sqes])
-
-    def get_sqe(self) -> UringSQE:
-        assert self._closed is False
-        sqe = UringSQE(self._uring)
-        self._sqes.add(sqe)
-        return sqe
-
-    def submit_callback(self, func: Callable[[], None]):
-        self._submit_callback = func
-
-
 class UringSQE:
-    def __init__(self, uring: Uring) -> None:
-        uring.setup()
-        self._uring = uring
-        if self._uring.sq_space_left() == 0:
-            raise NoSubmitQueueSpaceError
-        self._sqe: SQEType = liburing.io_uring_get_sqe(self._uring._uring)
+    def __init__(self, sqe: SQEType) -> None:
+        self._sqe: SQEType = sqe
         self._future: asyncio.Future[int] = asyncio.Future()
 
     def set_result(self, data: int):
@@ -240,6 +189,59 @@ class UringSQE:
             self._sqe, fd, path, flags, mask, statx_buf
         )
         return self
+
+
+_DEFAULT_URING: Uring = Uring()
+
+
+def set_default_uring(uring: Uring):
+    global _DEFAULT_URING
+    _DEFAULT_URING = uring
+
+
+def get_default_uring():
+    global _DEFAULT_URING
+    return _DEFAULT_URING
+
+
+class UringSession:
+    def __init__(self, uring: Optional[Uring] = None):
+        if uring is None:
+            uring = get_default_uring()
+        uring.setup()
+        self._uring: Uring = uring
+        self._sqes: set[UringSQE] = set()
+        self._closed: bool = True
+        self._submit_callback: Optional[Callable] = None
+
+    async def __aenter__(self):
+        return await self.open()
+
+    async def __aexit__(self, exc_type, exc, tb):
+        await self.close()
+
+    async def open(self) -> UringSession:
+        await self._uring.aquire_lock()
+        self._closed = False
+        self._sqes.clear()
+        return self
+
+    async def close(self):
+        self._closed = True
+        await self._uring.submit(self._sqes)
+        self._uring.release_lock()
+        if self._submit_callback is not None:
+            self._submit_callback()
+        await asyncio.gather(*[sqe.wait() for sqe in self._sqes])
+
+    def get_sqe(self) -> UringSQE:
+        assert self._closed is False
+        sqe = self._uring._get_sqe()
+        self._sqes.add(sqe)
+        return sqe
+
+    def submit_callback(self, func: Callable[[], None]):
+        self._submit_callback = func
 
 
 class UringFile:
