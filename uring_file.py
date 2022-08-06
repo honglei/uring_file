@@ -136,8 +136,7 @@ class Uring:
             self._waiting_sqes[sqe._sqe.user_data] = sqe
         if self.sq_space_left() < self._session_sq_size or self._waiting_sessions == 0:
             liburing.io_uring_submit(self._uring)
-            if self._waiting_sessions == 0:
-                await asyncio.sleep(0)  # Insert other tasks and allow the other sessions to request the lock.
+            await asyncio.sleep(0) # Update self._waiting_sessions
 
     def session(self):
         return UringSession(self)
@@ -238,7 +237,7 @@ class UringSession:
         self._closed = True
         await self._uring.submit(self._sqes)
         self._uring.release_lock()
-        await asyncio.gather(*[sqe.wait() for sqe in self._sqes])
+        [await sqe.wait() for sqe in self._sqes]
 
     def get_sqe(self) -> UringSQE:
         assert self._closed is False
@@ -351,7 +350,7 @@ class UringFile:
     async def close_workers(self):
         if self._worker_closed is False:
             self._worker_closed = True
-            await asyncio.gather(*self._workers)
+            [await worker for worker in self._workers.copy()]
 
     def add_worker(self, task: asyncio.Future):
         self._workers.add(task)
