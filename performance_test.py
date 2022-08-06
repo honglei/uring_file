@@ -54,19 +54,21 @@ async def run_performance_test():
     file_num = 1000
     write_data = 'helloworldhelloworldhelloworldhelloworldhelloworldhelloworldhelloworld\n'
 
-    async def random_wait():
-        await asyncio.sleep(random.gammavariate(2, 1)*0.6e-3)  # about 1ms
+    async def wait_write():
+        await asyncio.sleep(random.uniform(0, 1))
+
+    async def wait_read():
+        await asyncio.sleep(random.uniform(0, 1e-1))
 
     # anyio
     async def anyio_write(filen_name: str):
-        await random_wait()
+        await wait_write()
         async with await anyio.open_file(filen_name, "w") as f:
             for _ in range(line_num):
-                await random_wait()
                 await f.write(write_data)
 
     async def anyio_read(filen_name: str):
-        await random_wait()
+        await wait_read()
         async with await anyio.open_file(filen_name, "r") as f:
             await f.read()
 
@@ -74,14 +76,13 @@ async def run_performance_test():
 
     # aiofiles
     async def aiofiles_write(filen_name: str):
-        await random_wait()
+        await wait_write()
         async with aiofiles.open(filen_name, "w") as f:
             for _ in range(line_num):
-                await random_wait()
                 await f.write(write_data)
 
     async def aiofiles_read(filen_name: str):
-        await random_wait()
+        await wait_read()
         async with aiofiles.open(filen_name, "r") as f:
             await f.read()
 
@@ -89,14 +90,13 @@ async def run_performance_test():
 
     # uring_file
     async def uring_file_write(filen_name: str):
-        await random_wait()
+        await wait_write()
         async with uring_file.open(filen_name, "w") as f:
             for _ in range(line_num):
-                await random_wait()
                 await f.write(write_data)
 
     async def uring_file_read(filen_name: str):
-        await random_wait()
+        await wait_read()
         async with uring_file.open(filen_name, "r") as f:
             await f.read()
 
@@ -104,14 +104,13 @@ async def run_performance_test():
 
     # aiofile
     async def aiofile_write(filen_name: str):
-        await random_wait()
+        await wait_write()
         async with async_open(filen_name, "w") as f:
             for _ in range(line_num):
-                await random_wait()
                 await f.write(write_data)
 
     async def aiofile_read(filen_name: str):
-        await random_wait()
+        await wait_read()
         async with async_open(filen_name, "r") as f:
             await f.read()
 
