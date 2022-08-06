@@ -30,7 +30,7 @@ async def test_read_write():
     # Low level Uring APIs
 
     # Create new Uring
-    uring = uring_file.Uring(sq_size=8, cq_size=64)
+    uring = uring_file.Uring(sq_size=8, cq_size=64, session_sq_size=4)
 
     # Get SQE and submit (Open file)
     async with uring.session() as session:
