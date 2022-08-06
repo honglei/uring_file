@@ -1,3 +1,4 @@
+# pip install anyio aiofile aiofiles
 import asyncio
 import random
 from aiofile import async_open
