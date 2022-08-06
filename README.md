@@ -31,7 +31,7 @@ async with uring_file.open('hello.txt', "r") as f:
 # Low level Uring APIs
 
 # Create new Uring
-uring = uring_file.Uring(sq_size=8, cq_size=64)
+uring = uring_file.Uring(sq_size=8, cq_size=64, session_sq_size=4)
 
 # Get SQE and submit (Open file)
 async with uring.session() as session:
