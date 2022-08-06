@@ -136,7 +136,7 @@ class Uring:
             self._waiting_sqes[sqe._sqe.user_data] = sqe
         if self.sq_space_left() < self._session_sq_size or self._waiting_sessions == 0:
             liburing.io_uring_submit(self._uring)
-            await asyncio.sleep(0) # Update self._waiting_sessions
+            await asyncio.sleep(0)  # Update self._waiting_sessions
 
     def session(self):
         return UringSession(self)

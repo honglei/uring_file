@@ -55,7 +55,7 @@ async def run_performance_test():
     write_data = 'helloworldhelloworldhelloworldhelloworldhelloworldhelloworldhelloworld\n'
 
     async def random_wait():
-        await asyncio.sleep(random.uniform(0, 0.001))
+        await asyncio.sleep(random.gammavariate(2, 1)*0.6e-3)  # about 1ms
 
     # anyio
     async def anyio_write(filen_name: str):
