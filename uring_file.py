@@ -62,13 +62,13 @@ class NoSubmitQueueSpaceError(Exception):
 
 
 class Uring:
-    def __init__(self, sq_size: int = 128, cq_size: int = 256, min_sq_size: int = 4):
+    def __init__(self, sq_size: int = 128, cq_size: int = 256, session_sq_size: int = 4):
         self._uring: UringType = liburing.io_uring()
         self._eventfd: int = libc.eventfd(0, os.O_NONBLOCK | os.O_CLOEXEC)
         self._waiting_sqes: dict[int, UringSQE] = {}
         self._sq_size: int = sq_size
         self._cq_size: int = cq_size
-        self._min_sq_size: int = min_sq_size
+        self._session_sq_size: int = session_sq_size
         self._setup_done: bool = False
         self._loop: asyncio.AbstractEventLoop
         self._lock: asyncio.Lock = asyncio.Lock()
@@ -134,7 +134,7 @@ class Uring:
             await self._sem.acquire()
             sqe._sqe.user_data = id(sqe._future)
             self._waiting_sqes[sqe._sqe.user_data] = sqe
-        if self.sq_space_left() < self._min_sq_size or self._waiting_sessions == 0:
+        if self.sq_space_left() < self._session_sq_size or self._waiting_sessions == 0:
             liburing.io_uring_submit(self._uring)
             if self._waiting_sessions == 0:
                 await asyncio.sleep(0)  # Insert other tasks and allow the other sessions to request the lock.
