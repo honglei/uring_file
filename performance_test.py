@@ -51,7 +51,7 @@ async def io_test(func_write: Callable[[str], Coroutine], func_read: Callable[[s
 
 async def run_performance_test():
     line_num = 100
-    file_num = 100
+    file_num = 1000
     write_data = 'helloworldhelloworldhelloworldhelloworldhelloworldhelloworldhelloworld\n'
 
     async def random_wait():
@@ -87,21 +87,6 @@ async def run_performance_test():
 
     await io_test(aiofiles_write, aiofiles_read, "test_files", file_num)
 
-    # aiofile
-    async def aiofile_write(filen_name: str):
-        await random_wait()
-        async with async_open(filen_name, "w") as f:
-            for _ in range(line_num):
-                await random_wait()
-                await f.write(write_data)
-
-    async def aiofile_read(filen_name: str):
-        await random_wait()
-        async with async_open(filen_name, "r") as f:
-            await f.read()
-
-    await io_test(aiofile_write, aiofile_read, "test_files", file_num)
-
     # uring_file
     async def uring_file_write(filen_name: str):
         await random_wait()
@@ -116,6 +101,21 @@ async def run_performance_test():
             await f.read()
 
     await io_test(uring_file_write, uring_file_read, "test_files", file_num)
+
+    # aiofile
+    async def aiofile_write(filen_name: str):
+        await random_wait()
+        async with async_open(filen_name, "w") as f:
+            for _ in range(line_num):
+                await random_wait()
+                await f.write(write_data)
+
+    async def aiofile_read(filen_name: str):
+        await random_wait()
+        async with async_open(filen_name, "r") as f:
+            await f.read()
+
+    await io_test(aiofile_write, aiofile_read, "test_files", file_num)
 
 
 if __name__ == '__main__':
