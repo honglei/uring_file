@@ -302,7 +302,7 @@ class UringFile:
         stxs: list[StatXType] = liburing.statx()
         async with self._uring.session() as session:
             session.get_sqe().prep_statx(
-                self._fd, "".encode(), liburing.AT_EMPTY_PATH | liburing.AT_SYMLINK_NOFOLLOW,
+                self._fd, b"", liburing.AT_EMPTY_PATH | liburing.AT_SYMLINK_NOFOLLOW,
                 liburing.STATX_ALL, stxs
             )
         return stxs[0]
