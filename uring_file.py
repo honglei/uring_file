@@ -61,6 +61,10 @@ class NoSubmitQueueSpaceError(Exception):
     pass
 
 
+class NoSubmitQueueSpaceErrorForSession(Exception):
+    pass
+
+
 class Uring:
     def __init__(self, sq_size: int = 128, cq_size: int = 256, session_sq_size: int = 4):
         self._uring: UringType = liburing.io_uring()
@@ -241,6 +245,10 @@ class UringSession:
 
     def get_sqe(self) -> UringSQE:
         assert self._closed is False
+        if len(self._sqes) >= self._uring._session_sq_size:
+            raise NoSubmitQueueSpaceErrorForSession(
+                f"This Uring limits the number of SQEs issued per session up to {self._uring._session_sq_size}."
+            )
         sqe = self._uring._get_sqe()
         self._sqes.add(sqe)
         return sqe
