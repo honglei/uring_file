@@ -3,6 +3,13 @@
 - python 3.8+
 - linux kernel 5.7+
 
+### Installation
+
+```
+pip install git+https://github.com/tree4096/uring_file.git
+```
+
+
 ### Usage
 
 ```python
