@@ -260,7 +260,7 @@ class UringFile:
             uring = get_default_uring()
         uring.setup()
         self._uring: Uring = uring
-        self._path: str = os.path.normpath(path)
+        self._path: str = str(path)
         self._fd: Optional[int] = None
         self._offset: int = 0
         self._closed: bool = True
